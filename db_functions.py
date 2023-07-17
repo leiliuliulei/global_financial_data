@@ -1,4 +1,3 @@
-import requests
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
@@ -6,9 +5,15 @@ from datetime import datetime
 
 class MySQLQuery(object):
 
-    def __init__(self, engine, dictionary_book):
+    def __init__(self, engine, dictionary_file_path):
+
         self.__engine = engine
-        self.__name_book = dictionary_book
+
+        sheet_list = ['stock2100', 'stock2300', 'stock2301', 'stock2302', 'stock2303', 'stock2401', 'stock2402']
+        sheet_dfs = pd.read_excel(dictionary_file_path, sheet_name=sheet_list)
+        database_dicts = {k: v.set_index('英文名称')['中文名称'].to_dict() for (k, v) in sheet_dfs.items()}
+
+        self.__name_book = database_dicts
 
     def __query(self, query_string, table_name):
         df = pd.read_sql_query(query_string, self.__engine).rename(columns=self.__name_book[table_name])
@@ -42,6 +47,17 @@ class MySQLQuery(object):
         d_nc = all_company_df.set_index('证券简称')['证券代码'].to_dict()                # 上市公司名称对应的证券代码
 
         return all_stock_name, all_industry, d_12, d_23, d_3n, d_n1, d_n2, d_n3, d_nc
+
+    def get_location_and_profit(self, which_industry):
+
+        query_loc = r'SELECT s21.SECNAME, s21.SECCODE, s21.F028V, s21.F036V, s21.F038V, s23.F006N ' \
+                    r'FROM stock2100 s21 ' \
+                    r'INNER JOIN stock2301 s23 ON s21.SECCODE = s23.SECCODE ' \
+                    r'WHERE s21.F034V = "{i}" and s21.CHANGE_CODE <> 2 ' \
+                    r'and s23.F001D = "{y}-12-31" and s23.F002V = "071001" ' \
+                    r'and s23.CHANGE_CODE <> 2;'.format(i=which_industry, y=newest_fiscal_year())
+
+        return self.__query(query_loc, 'stock2100')
 
     @staticmethod
     def __option_dicts(df, key_column, value_column):
@@ -163,29 +179,55 @@ def newest_fiscal_year():
     return newest_year
 
 
-def static_ttm_forcast(data_series, by_which_date):
+def add_eps_pe(income_df, price_df):
 
-    cut_series = data_series[:by_which_date]
+    # 计算（年度）每股收益的静态、ttm和预测数据。因此需要先获取（季度）“稀释每股收益”的历史数据。
+    # “稀释每股收益”那列有时为空，这时就用基本每股收益数据来填充。正好有一个combine_first函数执行这个逻辑
+    column_name = 'combined_eps'
+    income_df[column_name] = income_df['（二）稀释每股收益'].combine_first(income_df['（一）基本每股收益'])
+    income_df.dropna(subset=column_name, inplace=True)
 
-    last_report = cut_series.index[-1]
-    one_year_ago = last_report - pd.offsets.Day(365)
-    previous_year_end = last_report - pd.offsets.YearEnd(1)
+    for current_date, row in income_df.iterrows():
 
-    if last_report.month == 12:
-        static = ttm = forcast = cut_series.iloc[-1]
+        if current_date.month == 12:
+            static = ttm = forcast = row[column_name]
+        else:
+            try:
+                previous_year_end = current_date - pd.offsets.YearEnd(1)
+                static = income_df.at[previous_year_end, column_name]
 
-    else:
-        try:
-            static = cut_series.loc[previous_year_end]
-            ttm = static - cut_series.loc[one_year_ago] + cut_series.loc[last_report]
-            forcast = (cut_series.loc[last_report] / cut_series.loc[one_year_ago]) * static
-        except KeyError:
-            static = ttm = forcast = None
+                one_year_ago = datetime(year=current_date.year - 1, month=current_date.month, day=current_date.day)
+                ttm = static - income_df.at[one_year_ago, column_name] + income_df.at[current_date, column_name]
 
-    # 四舍五入
-    static, ttm, forcast = [round(v, 2) if v else None for v in [static, ttm, forcast]]
+                forcast = (income_df.at[current_date, column_name] / income_df.at[one_year_ago, column_name]) * static
+            except KeyError:
+                static = ttm = forcast = None
 
-    return static, ttm, forcast
+        # 四舍五入
+        income_df.at[current_date, 'eps_static'] = static
+        income_df.at[current_date, 'eps_ttm'] = ttm
+        income_df.at[current_date, 'eps_forcast'] = forcast
+
+    # 合并EPS数据和股价数据
+    combined_df = pd.merge_ordered(left=price_df,
+                                   right=income_df,
+                                   left_on=price_df.index,
+                                   right_on=income_df.index,
+                                   fill_method='ffill').dropna(subset='eps_ttm')
+
+    # 改名字、设置index、删除没有价格的行（往往在上市之前，保留也没意义）
+    combined_df = combined_df.rename(columns={'key_0': '交易日期', '证券简称_x': '证券简称'}).set_index('交易日期')
+    combined_df = combined_df.dropna(subset='昨日收盘价')
+
+    # 计算三种PE
+    combined_df['pe_static'] = combined_df['昨日收盘价'].divide(combined_df.eps_static)
+    combined_df['pe_ttm'] = combined_df['昨日收盘价'].divide(combined_df.eps_ttm)
+    combined_df['pe_forcast'] = combined_df['昨日收盘价'].divide(combined_df.eps_forcast)
+
+    # 对于计算出来的几个值，设置
+    combined_df = combined_df.round({'eps_ttm': 2, 'eps_forcast': 2, 'pe_static': 1, 'pe_ttm': 1, 'pe_forcast': 1})
+
+    return combined_df
 
 
 def actual_growth(data_series, number_of_year=None):
@@ -261,25 +303,25 @@ def yi(df):
     return df.divide(1.e8).round(1)     # 这个函数返回以“亿”为单位的数据。1.e8是1亿。
 
 
-def income_chart(data_df, chart_name):
+def income_chart(data_df, title):
 
-    new_names = {'归属于母公司所有者的净利润': '归母净利润', '扣除非经常性损益后的净利润(2007版)': '扣非净利润', '经营活动现金流量净额': '经营现金流'}
+    change_names = {'归属于母公司所有者的净利润': '归母净利润', '扣除非经常性损益后的净利润(2007版)': '扣非净利润', '经营活动现金流量净额': '经营现金流'}
     needed_col = ['营业收入', '营业利润', '利润总额', '净利润', '归母净利润', '扣非净利润', '经营现金流']
 
-    df = pick_and_rename(data_df, needed_col, new_names)
+    df = pick_and_rename(data_df, needed_col, change_names)
 
-    return bar_figure(yi(df), '收入对比：{c}'.format(c=chart_name), y_cols=needed_col, y_title='单位：亿')
+    return bar_figure(yi(df), title, y_cols=needed_col, y_title='单位：亿')
 
 
 def cost_chart(data_df, chart_name):
 
-    new_names = {'一、营业总收入': '营业总收入', '其中：营业成本': '营业成本', '营业税金及附加': '营业税', '加：公允价值变动净收益': '公允价值变动收益'}
+    change_names = {'一、营业总收入': '营业总收入', '其中：营业成本': '营业成本', '营业税金及附加': '营业税', '加：公允价值变动净收益': '公允价值变动收益'}
 
     revenue_col = ['营业总收入']
     subtract_col = ['财务费用', '研发费用', '管理费用', '销售费用', '营业税', '利息支出', '营业成本']
     supplement_col = ['投资收益', '公允价值变动收益', '信用减值损失（2019格式）', '资产减值损失（2019格式）', '资产减值损失', '资产处置收益', '其它收入']
 
-    df = pick_and_rename(data_df, revenue_col + subtract_col + supplement_col, new_names)
+    df = pick_and_rename(data_df, revenue_col + subtract_col + supplement_col, change_names)
 
     # 这里跟一个squeeze()是为了把只有1个column的dataframe变成series，否则后面得到percentage_df那一步会全是Nan。
     revenue = df[revenue_col].squeeze()
@@ -297,130 +339,49 @@ def cost_chart(data_df, chart_name):
     percentage_df = combined_df.divide(revenue, axis='index').round(2)
 
     needed_col = percentage_df.columns
-    return bar_figure(percentage_df, '成本拆解：{c}'.format(c=chart_name), y_cols=needed_col, y_percent=True, stack=True)
+    return bar_figure(percentage_df, chart_name, y_cols=needed_col, y_percent=True, stack=True)
 
 
 def efficiency_chart(data_df, chart_name):
-    new_names = {'总资产报酬率': 'ROA', '加权平均净资产收益率': '加权平均ROE'}
+    change_names = {'总资产报酬率': 'ROA', '加权平均净资产收益率': '加权平均ROE'}
     needed_col = ['毛利率', '营业利润率', '净利润率', 'ROA', '加权平均ROE']
 
-    df = pick_and_rename(data_df, needed_col, new_names).round(1)
+    df = pick_and_rename(data_df, needed_col, change_names).round(1)
 
-    return bar_figure(df, '运营效率对比：{c}'.format(c=chart_name), y_cols=needed_col)
+    return bar_figure(df, chart_name, y_cols=needed_col)
 
 
 def warren_touch_chart(raw_df, company_name):
-    new_names = {'营运资金': '运营资本'}
+    change_names = {'营运资金': '运营资本'}
     needed_col = ['运营资本', '固定资产', '营业收入', '营业利润']
 
-    df = pick_and_rename(raw_df, needed_col, new_names).dropna(axis=0, how='all').dropna(axis=1, how='all')
+    df = pick_and_rename(raw_df, needed_col, change_names).dropna(axis=0, how='all').dropna(axis=1, how='all')
 
     # list(df)可以获得df的columns的名字列表。因为上一行有可能会删除一些完全没有数据的列，所以用list(df)获得更新后的列名
-    return area_figure(df, '运营资产弹性:{c}'.format(c=company_name), y_cols=list(df))
-
-
-def balance_sheet_chart(raw_df):
-
-    current_asset_total = ['流动资产合计']
-    current_asset_cols = ['货币资金', '交易性金融资产', '衍生金融资产', '一年内到期的非流动资产', '应收票据', '应收账款', '预付款项', '存货']
-
-    fixed_asset_total = ['非流动资产合计']
-    fixed_asset_cols = ['债权投资', '长期股权投资', '固定资产', '在建工程', '无形资产', '商誉', '递延所得税资产']
-
-    needed_cols = current_asset_total + current_asset_cols + fixed_asset_total + fixed_asset_cols
-    df = pick_and_rename(raw_df, needed_cols)
-
-    df['现金类'] = df['货币资金'] + df['交易性金融资产'] + df['衍生金融资产'] + df['一年内到期的非流动资产']
-    df['应收预付'] = df['应收票据'] + df['应收账款'] + df['预付款项']
-    df['其他流动资产'] = df['流动资产合计'] - df['现金类'] - df['应收预付'] - df['存货']
-
-    needed_cols = ['现金类', '应收预付', '存货', '其他流动资产']
-    combined_df = df[needed_cols]
-    # df['其他流动资产'] = df[current_asset_total] - df[current_asset_cols].sum(axis=1)
-    # df['其他固定资产'] = df[fixed_asset_total] - df[fixed_asset_cols].sum(axis=1)
-    # other_current_asset = df[current_asset_total].squeeze() - df[current_asset_cols].sum(axis=1)
-    # other_current_asset.name = '其他流动资产'
-    #
-    # other_fixed_asset = df[fixed_asset_total].squeeze() - df[fixed_asset_cols].sum(axis=1)
-    # other_fixed_asset.name = '其他固定资产'
-
-    # combined_df = pd.concat([df[current_asset_cols], other_current_asset, df[fixed_asset_cols], other_fixed_asset], axis=1)
-    # needed_cols = current_asset_cols + ['其他流动资产'] + fixed_asset_cols + ['其他固定资产']
-
-    return bar_figure(yi(combined_df), '资产表', y_cols=needed_cols, stack=True)
-
-
-def invested_capital(raw_df, company_name):
-
-    new_names = {'营运资金': '运营资本', '四、利润总额': '税前利润', '购建固定资产、无形资产和其他长期资产支付的现金': '固定资产投入'}
-    needed_col = ['运营资本', '固定资产投入', '税前利润']
-    df = pick_and_rename(raw_df, needed_col, new_names).dropna(how='all')
-
-    start_year = df['报告年度'].min()
-    start_workingCapital = df['运营资本']
-
-    end_year = raw_df['报告年度'].max()
+    return area_figure(df, company_name, y_cols=list(df))
 
 
 def annual_report_link(sec_code):
     return 'http://money.finance.sina.com.cn/corp/go.php/vCB_Bulletin/stockid/{c}/page_type/ndbg.phtml'.format(c=sec_code)
 
 
-def pe_calc(company_name, engine):
-
-    oldest_day = '2012-12-31'
-
-    # s1.F032N：稀释每股收益；s3.F006N: 扣除非经常性损益每股收益
-    # 如果没有 F070V = '071001' 这个过滤条件，会得到一些重复的数据。有的是当年提供的，有的是重述往年的。
-    sql_string_for_eps = r"select s1.ENDDATE, s1.DECLAREDATE, s1.F032N, s3.F006N " \
-                         r"from stock2301 s1 straight_join stock2303 s3 " \
-                         r"on(s1.SECNAME = s3.SECNAME and s1.ENDDATE = s3.ENDDATE) " \
-                         r"where s1.SECNAME = '{n}' and s1.CHANGE_CODE <> 2 and s3.CHANGE_CODE <> 2 " \
-                         r"and s1.F002V = '071001' and s3.F070V = '071001'" \
-                         r"order by S1.ENDDATE".format(n=company_name)
-
-    df_eps = mysql_query(sql_string_for_eps, engine)
-    df_eps.ENDDATE = pd.to_datetime(df_eps.ENDDATE)
-
-    # 这是包含所有季度数据、年度数据的原始 time series
-    raw_ts = df_eps.set_index('ENDDATE').squeeze().truncate(before=oldest_day)
-
-    # 提取出年度数据（xxxx-12-31那几行）
-    annual = raw_ts.reindex(pd.date_range(start=oldest_day, end=datetime.today(), freq='Y'))
-
-    # 上面的 annual 还查最后一行，那就是从最近一个12月31号直到今天的。所以在这个series最后补充一行数据：up_to_today
-    index_of_today = pd.Series(data=None, dtype=pd.Float64Dtype, index=[datetime.today()])
-    annual = pd.concat([annual, index_of_today])
-    quarter = pd.concat([raw_ts, index_of_today])
-
-    # 按照 business day ('B') 进行上采样并填上(ffill)最相邻的EPS数据
-    business_day_annual_eps = annual.resample('B').ffill()
-    business_day_quarter_eps = quarter.resample('B').ffill()
-
-    # 获取历史价格。F002N：收盘价
-    sql_string_for_price = r"select TRADEDATE, F002N from stock2402 where SECNAME = '{n}';".format(n=company_name)
-
-    df_price = pd.read_sql_query(sql_string_for_price, engine)
-    df_price.TRADEDATE = pd.to_datetime(df_price.TRADEDATE)
-
-    business_day_price = df_price.set_index('TRADEDATE').squeeze().truncate(before=oldest_day)
-
-    df_dictionary = {'静态PE': business_day_annual_eps, '动态PE': business_day_quarter_eps, '价格': business_day_price}
-    df = pd.concat(df_dictionary, axis=1).dropna(axis='index', how='any')
-
-
 def bar_figure(df, title, y_cols, stack=False, y_percent=False, y_title=''):
 
     df = df.fillna(0).reset_index()
     the_bar_mode = 'relative' if stack else 'group'
+    time = '报告年度' if '报告年度' in df else '交易日期'
 
     if is_single_company(df):
-        fig = px.bar(data_frame=df, x='报告年度', y=y_cols, title=title, opacity=0.8)
+        fig = px.bar(data_frame=df, x=time, y=y_cols, title=title, opacity=0.8)
     else:
         fig = px.bar(data_frame=df, x='证券简称', y=y_cols, animation_frame='报告年度', title=title, opacity=0.8)
 
-    fig.layout.update(xaxis_title='', yaxis_title=y_title, title=dict(x=0.5), barmode=the_bar_mode)
-    # fig.layout.update(xaxis_autorange='reversed')
+    fig.layout.update(
+        xaxis_title='',
+        yaxis_title=y_title,
+        title=dict(x=0.5),
+        barmode=the_bar_mode,
+    )
 
     if y_percent:
         fig.layout.update(yaxis=dict(tickformat='.0%'))
@@ -437,61 +398,26 @@ def area_figure(df, title, y_cols):
     return fig
 
 
-class CnInfoAPI:
+def map_figure(df, title):
 
-    def __init__(self, key, secret, dictionary_book, name_to_code_dict):
-        self.__token = self.__get_token(key, secret)
-        self.__name_book = dictionary_book
-        self.__d_nc = name_to_code_dict
+    my_token = 'pk.eyJ1IjoibGVpbGl1bGl1bGVpIiwiYSI6ImNsaGczamh5dTBleHgzaXBpM202MXI1ZHAifQ.IP6oZFtsoqtYtAaLnwboWQ'
+    px.set_mapbox_access_token(my_token)
 
-    def get_price(self, secname_list):
+    label_dict = {'申万行业分类二级名称': '申万二级行业', '申万行业分类三级名称': '申万三级行业', 'F006N': '总收入'}
+    df['城市+公司'] = df['所属城市'].str.cat(df['证券简称'], sep='<br>')
 
-        result_list = [self.__current_price_base(self.__d_nc[name]) for name in secname_list]
-        combined = pd.concat(result_list)
-        return combined
+    range_bins = [0, 1.e8, 1.e9, 1.e10, 1.e11, 1.e13]
+    label_list = [1, 2, 6, 12, 20]
+    df['收入级别'] = pd.cut(df.F006N, bins=range_bins, labels=label_list, include_lowest=True)
+    updated_title = '申万一级行业：{}'.format(title)
 
-    def __current_price_base(self, code):
+    fig = px.scatter_mapbox(data_frame=df, title=updated_title, lat='latitude', lon='longitude',
+                            text='城市+公司', hover_name='证券简称', labels=label_dict,
+                            color='申万行业分类三级名称', animation_frame='申万行业分类二级名称', animation_group='申万行业分类三级名称',
+                            size='收入级别', size_max=20, zoom=4, opacity=0.5,
+                            width=1500, height=1000, center=dict(lat=35, lon=105))
 
-        price_url = 'http://webapi.cninfo.com.cn/api/stock/p_stock2402'
+    fig.layout.update(title=dict(x=0.5))
 
-        last_trading_day = (datetime.today() - pd.offsets.BDay()).strftime('%Y-%m-%d')
-        post_data = {'scode': code, 'sdate': last_trading_day, 'edate': last_trading_day, '@column': 'SECNAME,TRADEDATE,F002N'}
-
-        downloaded = self.__cninfo_api(price_url, post_data)
-        renamed = downloaded.rename(columns=self.__name_book['stock2402']) if not downloaded.empty else downloaded
-        return renamed
-
-    def __get_token(self, key, secret):
-
-        url = 'http://webapi.cninfo.com.cn/api-cloud-platform/oauth2/token'
-        post_data = {'grant_type': 'client_credentials', 'client_id': key, 'client_secret': secret}
-
-        the_token = self.__cninfo_api(url, post_data, result_keyword='access_token', return_as_dataframe=False)
-
-        if the_token:
-            print('token获取成功')
-        else:
-            print('token获取失败')
-
-        return the_token
-
-    def __cninfo_api(self, url, post_data, result_keyword='records', return_as_dataframe=True):
-
-        # 对一般的查询，肯定需要附加token。但唯独对获取token的查询不需要（因为此时还没有token）
-        try:
-            post_data.update(access_token=self.__token)
-        except AttributeError:
-            pass
-
-        raw = requests.post(url=url, data=post_data).json()
-
-        try:
-            result = raw[result_keyword]
-        except KeyError:
-            print('数据获取错误，获取到的原始数据：', raw)
-            result = None
-
-        result = pd.DataFrame(result) if return_as_dataframe else result
-
-        return result
+    return fig
 

@@ -1,90 +1,134 @@
-from datetime import datetime
-from sqlalchemy import create_engine
-from random import randint
+import toml
 import dash
+import pandas as pd
+from random import randint
+from datetime import datetime
+import plotly.graph_objs as go
+from plotly.subplots import make_subplots
+from sqlalchemy import create_engine
 from dash import dcc, html, dash_table
 from dash.dependencies import Input, Output
-from db_functions import CnInfoAPI, MySQLQuery, translation_dictionary, income_chart, cost_chart, efficiency_chart, \
-    warren_touch_chart, annual_report_link, static_ttm_forcast, actual_growth, suggested_growth
+from db_functions import MySQLQuery, income_chart, cost_chart, efficiency_chart, \
+    warren_touch_chart, map_figure, annual_report_link, actual_growth, suggested_growth, add_eps_pe
 
-my_key, my_secret = 'fa4e980eaf7e4302811fb72336a648d0', '939563c8f0df4092b58823ae0d53ccb0'
-financial_db_engine = create_engine('mysql+pymysql://root:LaZhu_007@localhost:3306/financial_data')
+# 加载配置
+config = toml.load('configuration.toml')
 
-db_query = MySQLQuery(financial_db_engine, translation_dictionary())
-# api_query = CnInfoAPI(my_key, my_secret, translation_dictionary())
+# 获得数据库配置
+db = config['database']
+connection_string = 'mysql+pymysql://{account}:{password}@{address}:{port}/{name}'.format(
+    account=db['account'],
+    password=db['password'],
+    address=db['address'],
+    port=db['port'],
+    name=db['name']
+)
+financial_db_engine = create_engine(connection_string)
+db_query = MySQLQuery(financial_db_engine, db['dictionary_file_path'])
+a_new_query = MySQLQuery(financial_db_engine, db['dictionary_file_path'])
+geo_df = pd.read_excel(r'geo_locations.xlsx')
 
 stock_list, industry_list, d_12, d_23, d_3n, d_n1, d_n2, d_n3, d_nc = db_query.get_industry_info()
 
+a_random_number = randint(0, len(stock_list))
 
-header = html.H2('财务分析', style={'textAlign': 'center'})
+header = html.Header('财务分析')
 
-
-search_stock_left = html.Div(
+search_part = html.Nav(
     [
-        html.Label('个股'),
-        dcc.Dropdown(id='stock_dropdown', options=stock_list, value=stock_list[randint(0, 2000)]),
+        html.Label('个股', className='nav_label'),
+        dcc.Dropdown(id='stock_dropdown', className='nav_dropdown', options=stock_list, value=stock_list[a_random_number]),
 
-        html.Br(),
-        html.Br(),
-        html.Label('一级行业'), dcc.Dropdown(id='industry_dropdown', options=industry_list),
+        html.Label('一级行业', className='nav_label'),
+        dcc.Dropdown(id='industry_dropdown', className='nav_dropdown', options=industry_list),
+
+        html.Label('二级行业', className='nav_label'),
+        dcc.RadioItems(id='industry_2_radio', className='nav_radio', inline=True),
+
+        html.Label('三级行业', className='nav_label'),
+        dcc.RadioItems(id='industry_3_radio', className='nav_radio', inline=True),
+
+        html.Label('业内公司', className='nav_label'),
+        dcc.Tabs(id='tabs_compare_by', className='nav_tabs', value='tab_industry',
+                 children=[dcc.Tab(label='多选', className='nav_tabs', value='tab_industry', children=dcc.Checklist(id='stock_check', inline=True)),
+                           dcc.Tab(label='单选', className='nav_tabs', value='tab_company', children=dcc.RadioItems(id='stock_radio', inline=True))])
     ],
-    style={'padding': 10, 'flex': 1})
-
-search_stock_right = html.Div(
-    [
-        html.Label('二级行业'), dcc.RadioItems(id='industry_2_radio', inline=False),
-        html.Br(), html.Br(), html.Br(), html.Label('三级行业'), dcc.RadioItems(id='industry_3_radio')
-    ],
-    style={'padding': 10, 'flex': 5})
-
-search_stock = html.Div([search_stock_left, search_stock_right], style={'display': 'flex', 'flex-direction': 'row'})
-
-choose_stock = html.Div(
-    [
-        html.Br(),
-        html.Br(),
-        html.Br(),
-        html.Br(),
-        dcc.Tabs(id='tabs_compare_by', value='tab_industry',
-                 children=[dcc.Tab(label='全行业', value='tab_industry', children=dcc.Checklist(id='stock_check')),
-                           dcc.Tab(label='单一公司', value='tab_company', children=dcc.RadioItems(id='stock_radio'))]),
-        html.Br(),
-        html.Br()
-    ]
+    className='navigation'
 )
 
 
-charts = html.Div(
+result_part = html.Article(
     [
-        dcc.Loading(children=[dcc.Graph(id='income_bar')], type='circle'),
-        dcc.Loading(children=[dcc.Graph(id='cost_bar')], type='circle'),
-        dcc.Graph(id='efficiency_bar'),
-        dcc.Graph(id='warren_bar'),
-    ]
-)
+        html.Div(
+            [
+                html.H2(children='收入对比', id='title_income'),
+                dcc.Loading(children=[dcc.Graph(id='income_bar', className='chart')], type='circle')
+            ], className='chart_container'),
 
+        html.Div(
+            [
+                html.H2(children='成本拆解', id='title_cost'),
+                dcc.Loading(children=[dcc.Graph(id='cost_bar', className='chart')], type='circle')
+            ], className='chart_container'),
 
-value_table = html.Div(
-    [
+        html.Div(
+            [
+                html.H2(children='运营效率', id='title_efficiency'),
+                dcc.Graph(id='efficiency_bar', className='chart')
+            ], className='chart_container'),
+
+        html.Div(
+            [
+                html.H2(children='运营资产弹性', id='title_warren'),
+                dcc.Graph(id='warren_bar', className='chart')
+            ], className='chart_container'),
+
+        html.Div(
+            [
+                html.H2(children='历史估值', id='title_valuation'),
+                dcc.Graph(id='valuation_line', className='chart-tall')
+            ], className='chart_container'),
+
+        html.Div(
+            [
+                html.H2(children='产业地图', id='title_map'),
+                dcc.Graph(id='map', className='map')
+            ]),
+
         dash_table.DataTable(
             id='pe_table',
+            style_table={'width': 500, 'margin': 60},
             style_cell={'textAlign': 'center', 'whiteSpace': 'pre-line'},
             tooltip_duration=None,
-            columns=[{'id': '公司', 'name': '公司', 'presentation': 'markdown'},
-                     {'id': '价格', 'name': '价格'},
-                     {'id': 'PE', 'name': 'PE'},
-                     {'id': 'PE暗示的成长性', 'name': 'PE暗示的成长性'},
-                     {'id': '实际成长性（EPS）', 'name': '实际成长性（EPS）'}
-                     ]
+            columns=[
+                {'id': '公司', 'name': '公司', 'presentation': 'markdown'},
+                {'id': '价格', 'name': '价格'},
+                {'id': 'PE', 'name': 'PE'},
+                {'id': 'PE暗示的成长性', 'name': 'PE暗示的成长性'},
+                {'id': '实际成长性（EPS）', 'name': '实际成长性（EPS）'}
+            ]
         )
-    ],
-    style={'width': 500}
+    ]
 )
 
 
-external_stylesheets = ['https://cdn.jsdelivr.net/npm/water.css@2/out/water.css']
+aside_part = html.Aside(
+    [
+        html.H3('快速直达'),
+        html.Div(html.A(children='收入对比', href='#title_income'), className='aside_item'),
+        html.Div(html.A(children='成本拆解', href='#title_cost'), className='aside_item'),
+        html.Div(html.A(children='运营效率', href='#title_efficiency'), className='aside_item'),
+        html.Div(html.A(children='资产弹性', href='#title_warren'), className='aside_item'),
+        html.Div(html.A(children='历史估值', href='#title_valuation'), className='aside_item'),
+        html.Div(html.A(children='产业地图', href='#title_map'), className='aside_item'),
+        html.Div(html.A(children='成长性数据', href='#pe_table'), className='aside_item')
+    ], className='aside'
+)
+
+main = html.Main([search_part, result_part, aside_part], style={'display': 'flex'})
+
 app = dash.Dash(__name__)
-app.layout = html.Div([header, search_stock, choose_stock, charts, value_table])
+app.layout = html.Div([header, main])
 
 
 # 选择公司
@@ -164,6 +208,34 @@ def update_charts(compared_by, industry_3_name, secname_list, company_name):
     return income_fig, cost_fig, efficiency_fig, warren_fig
 
 
+# 历史估值图。因为画图方法比较独立，所以单独拎出来。
+@app.callback(Output('valuation_line', 'figure'), Input('stock_radio', 'value'))
+def valuation_chart(company_name):
+
+    # 从数据库获取数据
+    # income_df = db_query.get_income([company_name], annual_only=False, reindex_year_and_name=False).set_index('报告年度')
+    income_df = a_new_query.get_income([company_name], reindex_year_and_name=False).set_index('报告年度')
+    price_df = a_new_query.history_price([company_name]).set_index('交易日期')
+
+    # 把计算出来的静态、TTM、预测EPS数据、股价、PE数据，加进df里
+    combined_df = add_eps_pe(income_df, price_df)
+
+    # 每季度采一个样应该够了。BQS表示 Business Quarter Start
+    # tail(40)：最多40个季度(即10年)的数据。时间太久远意义不大而且图不好看了。
+    # chart_df = combined_df.resample('BQS').nearest().tail(40)
+    chart_df = combined_df.resample('A-MAY', convention='end').nearest().loc[:datetime.today()]
+
+    # 画图。尝试过画在一起但大小差异很大，不好看。因此分成三个独立的图。
+    fig = make_subplots(rows=3, cols=1, subplot_titles=['每股收益（TTM）', '股价', '市盈率（TTM）'], vertical_spacing=0.1)
+    fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['eps_ttm'], mode='lines+markers+text', text=chart_df['eps_ttm'], textposition='top center'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['昨日收盘价'], mode='lines+markers+text', text=chart_df['昨日收盘价'].round(1), textposition='top center'), row=2, col=1)
+    fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['pe_ttm'], mode='lines+markers+text', text=chart_df['pe_ttm'].round(), textposition='top center'), row=3, col=1)
+
+    fig.update_layout(height=800, width=len(chart_df)*60, title_text=company_name, showlegend=False)
+
+    return fig
+
+
 # 更新表
 @app.callback(Output('pe_table', 'data'),
               Output('pe_table', 'tooltip_data'),
@@ -176,7 +248,7 @@ def update_table(compared_by, secname_list, company_name):
         secname_list = [company_name]
 
     # 获取数据
-    price_df = db_query.latest_price(secname_list)
+    price_df = db_query.history_price(secname_list)
     quarterly_income = db_query.get_income(secname_list, annual_only=False, reindex_year_and_name=False)
 
     table_data = []
@@ -185,35 +257,24 @@ def update_table(compared_by, secname_list, company_name):
 
         report = r'[{}]({})'.format(secname, annual_report_link(d_nc[secname]))
 
-        # 获取稀释每股收益（diluted EPS）数据
-        # diluted_eps那列有时为空，这时就用basic_eps那列数据来填充。正好有一个combine_first函数执行这个逻辑
-        single_company_df = quarterly_income.query('证券简称=="{}"'.format(secname)).set_index('报告年度')
-        basic_eps = single_company_df['（一）基本每股收益']
-        diluted_eps = single_company_df['（二）稀释每股收益'].combine_first(basic_eps)
+        # 获取几个每股收益（EPS）数据
+        single_company_income = quarterly_income.query('证券简称=="{}"'.format(secname)).set_index('报告年度')
+        single_company_price = price_df.query('证券简称=="{}"'.format(secname)).set_index('交易日期')
 
-        static_eps, ttm_eps, forcast_eps = static_ttm_forcast(diluted_eps, datetime.today())
-
-        try:
-            price_row = price_df.loc[secname]
-        except KeyError:
-            its_price = static_pe = ttm_pe = forcast_pe = '未获取价格'
-            price_date = None
-        else:
-            its_price = price_row['昨收盘']
-            price_date = price_row['交易日期'].strftime('%Y-%m-%d')
-            static_pe, ttm_pe, forcast_pe = [round(its_price/v, 1) if v else None for v in [static_eps, ttm_eps, forcast_eps]]
+        last_row = add_eps_pe(single_company_income, single_company_price).reset_index().iloc[-1]
+        diluted_eps = single_company_income.combined_eps.squeeze()
 
         data_row = {'公司': report,
 
-                    '价格': its_price,
+                    '价格': last_row['昨日收盘价'],
 
-                    'PE': '静态：{}\nTTM：{}\n预测：{}'.format(static_pe, ttm_pe, forcast_pe),
+                    'PE': '静态：{}\nTTM：{}\n预测：{}'.format(last_row.pe_static, last_row.pe_ttm, last_row.pe_forcast),
 
                     'PE暗示的成长性':
                         '静态：{}\nTTM：{}\n预测：{}'.format(
-                            suggested_growth(static_pe),
-                            suggested_growth(ttm_pe),
-                            suggested_growth(forcast_pe)
+                            suggested_growth(last_row.pe_static),
+                            suggested_growth(last_row.pe_ttm),
+                            suggested_growth(last_row.pe_forcast)
                         ),
 
                     '实际成长性（EPS）':
@@ -225,15 +286,30 @@ def update_table(compared_by, secname_list, company_name):
 
                     }
 
-        tooltip_row = {'PE': {'value': '静态 EPS：{}\\\nTTM EPS：{}\\\n预测 EPS：{}'.format(static_eps, ttm_eps, forcast_eps),
-                              'type': 'markdown'},
-
-                       '价格': '日期：{}'.format(price_date)}
+        tooltip_row = {
+            'PE':
+                {'value': '静态 EPS：{}\\\nTTM EPS：{}\\\n预测 EPS：{}'.format(last_row.eps_static, last_row.eps_ttm, last_row.eps_forcast),
+                'type': 'markdown'},
+            '价格':
+                '日期：{}'.format(last_row['交易日期'].strftime('%Y-%m-%d'))}
 
         table_data.append(data_row)
         tooltip_data.append(tooltip_row)
 
     return table_data, tooltip_data
+
+
+# 地图
+@app.callback(Output('map', 'figure'), Input('industry_dropdown', 'value'))
+def update_map(industry_1_name):
+
+    # 获取数据
+    location_df = db_query.get_location_and_profit(industry_1_name)
+
+    # 附加GPS信息
+    merged_df = location_df.merge(geo_df, left_on='所属城市', right_on='区域名称').dropna()
+
+    return map_figure(merged_df, industry_1_name)
 
 
 if __name__ == '__main__':
