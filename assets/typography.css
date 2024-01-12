@@ -24,7 +24,7 @@ h2 {
 }
 
 .nav_dropdown {
-    width: 150px;
+    width: 200px;
     padding: 0.4em;
 	padding-bottom: 2em;
 }
@@ -66,15 +66,24 @@ h2 {
 }
 
 .aside {
-    width: 600px;
-	padding:20px;
-	margin:5px;
+    position: fixed;
+    right: 0;
+    top: 0;
+    width: 150px;
+    height: 100vh;
+
+	padding:5px;
+	margin: 10px;
+	margin-top:80px;
+	overflow-y: auto;
+
 	border-left:1px solid Gainsboro;
 	background-color: #F8F8F8;
+
+	text-align: center;
 }
 
 .aside_item {
-    text-align: left;
     margin: 10px;
 }
 
