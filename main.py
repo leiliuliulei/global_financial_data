@@ -2,14 +2,11 @@ import dash
 from random import choice
 from dash import dcc, html, dash_table
 from dash.dependencies import Input, Output, State
-from analyser import DataA, DataH
+from analyser import WebFig
+from database import Segment
 
-segment_a = DataA(None).segment_info()
-segment_h = DataH(None).segment_info()
-
-stock_list_a = segment_a['stocks']
-stock_list_h = segment_h['stocks']
-stock_list = [f'{name} A' for name in stock_list_a] + [f'{name} H' for name in stock_list_h]
+seg = Segment()
+stock_list = [f'{name} A' for name in seg.stocks(market='A')] + [f'{name} H' for name in seg.stocks(market='H')]
 
 header = html.Header('财务分析')
 
@@ -65,14 +62,20 @@ result_part = html.Article(
         html.Div([html.H2(children='历史估值', id='title_valuation'), dcc.Graph(id='valuation_line', className='chart-tall')],
                  className='chart_container'),
 
-        dash_table.DataTable(id='pe_table', style_table={'width': 500, 'margin': 60},
+        dash_table.DataTable(id='pe_table', style_table={'width': 1000, 'margin': 60},
                              style_cell={'textAlign': 'center', 'whiteSpace': 'pre-line'}, tooltip_duration=None,
                              columns=[
                                  {'id': '公司', 'name': '公司', 'presentation': 'markdown'},
+                                 {'id': '上市年限', 'name': '上市年限'},
                                  {'id': '价格', 'name': '价格'},
+                                 {'id': '毛利率', 'name': '毛利率'},
+                                 {'id': '净利率', 'name': '净利率'},
+                                 {'id': 'ROE', 'name': 'ROE'},
+                                 {'id': '资产负债比', 'name': '资产负债比'},
                                  {'id': 'PE', 'name': 'PE'},
-                                 {'id': 'PE暗示的成长性', 'name': 'PE暗示的成长性'},
-                                 {'id': '实际EPS成长性', 'name': '实际EPS成长性'}]),
+                                 {'id': 'EPS成长性', 'name': 'EPS成长性'},
+                                 {'id': '估值gap', 'name': '估值gap'},
+                                 {'id': '总收益', 'name': '总收益'}]),
 
         html.Div([html.H2(children='产业地图', id='title_map'), dcc.Graph(id='map', className='map')])
     ]
@@ -95,7 +98,7 @@ aside_part = html.Aside(
 
 main = html.Main([search_part, result_part, aside_part], style={'display': 'flex'})
 
-app = dash.Dash(__name__)
+app = dash.Dash(__name__, prevent_initial_callbacks='initial_duplicate')
 app.layout = html.Div([header, main])
 
 
@@ -108,50 +111,29 @@ app.layout = html.Div([header, main])
               Input('stock_dropdown', 'value'))
 def stock_trigger(stock_name):
 
-    stock_name = stock_name[:-2]            # 去除股票名称最后面跟着的 A 或者 H 字样
+    # 把从界面获得的股票字符串拆分成纯名字和market。然后获得对应的行业信息。
+    name, market = str(stock_name).split()
+    seccode = seg.code(name, market)
+    industry_1_options = seg.industry_list(market=market)
+    industry_1_value, industry_2_value, industry_3_value = seg.belong(seccode)
 
-    if stock_name in stock_list_a:
-        market = 'A股'
-        industry_options = segment_a['industry_1']
-        industry_name = segment_a['d_n1'][stock_name]
-        industry_2_value = segment_a['d_n2'][stock_name]
-        industry_3_value = segment_a['d_n3'][stock_name]
-
-    elif stock_name in stock_list_h:
-        market = '港股'
-        industry_options = segment_h['industry_1']
-        industry_name = segment_h['d_n1'][stock_name]
-        industry_2_value = segment_h['d_n2'][stock_name]
-        industry_3_value = None
-
-    else:
-        market = None
-        industry_options = None
-        industry_name = None
-        industry_2_value = None
-        industry_3_value = None
-
-    return market, industry_options, industry_name, industry_2_value, industry_3_value
+    return market, industry_1_options, industry_1_value, industry_2_value, industry_3_value
 
 
 @app.callback(Output('industry_2_radio', 'options'),
               Input('industry_dropdown', 'value'),
               State('market', 'data'))
-def industry_trigger(industry_name, market):
-    if market == 'A股':
-        return segment_a['d_12'][industry_name]
-    else:
-        return segment_h['d_12'][industry_name]
+def industry_trigger(industry_1_value, market):
+    industry_2_options = seg.d12(industry_1_value, market)
+    return industry_2_options
 
 
 @app.callback(Output('industry_3_radio', 'options'),
               Input('industry_2_radio', 'value'),
               State('market', 'data'))
-def industry_2_trigger(industry_2_name, market):
-    if market == 'A股':
-        return segment_a['d_23'][industry_2_name]
-    else:
-        return []
+def industry_2_trigger(industry_2_value, market):
+    industry_3_options = seg.d23(industry_2_value, market)
+    return industry_3_options
 
 
 @app.callback(Output('stock_check', 'options'),
@@ -162,25 +144,24 @@ def industry_2_trigger(industry_2_name, market):
               Input('industry_3_radio', 'value'),
               State('stock_dropdown', 'value'),
               State('market', 'data'))
-def industry_3_trigger(industry_2_name, industry_3_name, stock_name, market):
+def industry_3_trigger(industry_2_value, industry_3_value, stock_name, market):
 
-    if market == 'A股':
-        all_companies = segment_a['d_3n'][industry_3_name]
-        sorted_companies = DataA(all_companies).sort()
-    else:
-        all_companies = segment_h['d_3n'][industry_2_name]
-        sorted_companies = DataH(all_companies).sort()
+    companies = seg.d3c(industry_2_value, industry_3_value, market)
+    stock_code = seg.code(stock_name[:-2], market)
 
-    to_be_checked = sorted_companies[:15]
+    # 复选逻辑：默认选取行业（收入）前15名。如果感兴趣的公司不在前15名，就把它加进去
+    checked = companies[:15]
+    if stock_code in companies and stock_code not in checked:
+        checked.append(stock_code)
 
-    stock_name = stock_name[:-2]            # 去除股票名称最后面跟着的 A 或者 H 字样
-    if stock_name in sorted_companies and stock_name not in to_be_checked:
-        to_be_checked.append(stock_name)
+    # 单选逻辑：如果搜索框里的公司属于当前行业，则选择该公司；如果不属于，说明用户直接换了一个行业，则选择行业第一的公司
+    single_selected = stock_code if stock_code in companies else companies[0]
 
-    # 逻辑：如果搜索框里的公司属于当前行业，则选择该公司；如果不属于，说明用户直接换了一个行业，则选择行业第一的公司
-    to_be_selected = stock_name if stock_name in sorted_companies else sorted_companies[0]
+    # 针对Dash的checkList对象进行优化：
+    # label是界面上显示的文本，这里显示证券名称，方便阅读；value是checkList的实际值，选择seccode以方便程序后续处理。
+    companies_options = [{'label': seg.name(code), 'value': code} for code in companies]
 
-    return sorted_companies, to_be_checked, sorted_companies, to_be_selected
+    return companies_options, checked, companies_options, single_selected
 
 
 # income做为第一个图，先单独画出来。用户感受更好。
@@ -195,12 +176,11 @@ def industry_3_trigger(industry_2_name, industry_3_name, stock_name, market):
 )
 def income_chart(compared_by, company_list, company, industry_2_name, industry_3_name, market):
 
-    target = company if compared_by == 'tab_company' else company_list
-
-    if market == 'A股':
-        return DataA(target).income_fig(industry_3_name)
+    if compared_by == 'tab_company':
+        return WebFig(seccodes=company, market=market).income_fig(title=seg.name(company))
     else:
-        return DataH(target).income_fig(industry_2_name)
+        title = industry_3_name if industry_3_name else industry_2_name
+        return WebFig(seccodes=company_list, market=market).income_fig(title=title)
 
 
 # 画完income图之后再画其他图。因此，这里的input用到了上面的图的output
@@ -216,16 +196,18 @@ def income_chart(compared_by, company_list, company, industry_2_name, industry_3
               State('market', 'data'))
 def other_basic_charts(income_figure, compared_by, company_list, company, industry_2_name, industry_3_name, market):
 
-    target = company if compared_by == 'tab_company' else company_list
-
-    if market == 'A股':
-        f2 = DataA(target).cost_fig(industry_3_name)
-        f3 = DataA(target).efficiency_fig(industry_3_name)
-        f4 = DataA(company).warren_fig()
+    if compared_by == 'tab_company':
+        fig_engine = WebFig(seccodes=company, market=market)
+        f2 = fig_engine.cost_fig(title=seg.name(company))
+        f3 = fig_engine.efficiency_fig(title=seg.name(company))
+        f4 = fig_engine.warren_fig(title=seg.name(company))
     else:
-        f2 = DataH(target).cost_fig(industry_2_name)
-        f3 = DataH(target).efficiency_fig(industry_2_name)
-        f4 = DataH(company).warren_fig()
+        fig_engine = WebFig(seccodes=company_list, market=market)
+        title = industry_3_name if industry_3_name else industry_2_name
+        f2 = fig_engine.cost_fig(title=title)
+        f3 = fig_engine.efficiency_fig(title=title)
+
+        f4 = WebFig(seccodes=company, market=market).warren_fig(title=seg.name(company))
 
     return f2, f3, f4
 
@@ -238,16 +220,12 @@ def other_basic_charts(income_figure, compared_by, company_list, company, indust
               Input('stock_check', 'value'),
               Input('stock_radio', 'value'),
               State('market', 'data'))
-def growth_and_valuation(income_figure, secname_list, company_name, market):
+def growth_and_valuation(income_figure, company_list, company, market):
 
-    if market == 'A股':
-        f = DataA(company_name).valuation_fig()                     # 历史估值图
-        data, tooltip = DataA(secname_list).growth_table()          # 成长性表格
-    else:
-        f = DataH(company_name).valuation_fig()
-        data, tooltip = DataH(secname_list).growth_table()
+    fig = WebFig(seccodes=company, market=market).valuation_fig(title=seg.name(company))
+    data, tooltip = WebFig(seccodes=company_list, market=market).gui_table()
 
-    return f, data, tooltip
+    return fig, data, tooltip
 
 
 # 地图
@@ -256,11 +234,7 @@ def growth_and_valuation(income_figure, secname_list, company_name, market):
               Input('industry_2_radio', 'value'),
               State('market', 'data'))
 def industrial_map(income_figure, industry_2_name, market):
-
-    if market == 'A股':
-        return DataA(secname=None).industry_map(industry_2_name)
-    else:
-        return None
+    return WebFig(seccodes=None, market=market).industry_map(industry_2_name)
 
 
 if __name__ == "__main__":

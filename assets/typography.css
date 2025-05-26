@@ -11,7 +11,6 @@ header {
     /*margin: 0.5em;*/
 }
 
-
 h2 {
     margin-left:80px;
 }
@@ -63,6 +62,7 @@ h2 {
 	margin:5px;
 	border-right:1px solid Gainsboro;
 	background-color: #F8F8F8;
+	box-shadow: 0 2px 6px rgba(0,0,0,0.1);
 }
 
 .aside {
