@@ -162,7 +162,7 @@ class WebFig(object):
         location_df = self._data.location(industry_2_name)
 
         # 附加这些城市的GPS位置
-        geo_config = toml.load('configuration.toml')['geo']
+        geo_config = toml.load('../configuration.toml')['geo']
 
         px.set_mapbox_access_token(geo_config['mapbox_token'])
         geo_df = pd.read_excel(geo_config['geo_file_path'])

@@ -1,4 +1,4 @@
-from analyser import Cli
+from gui.analyser import Cli
 from rich.prompt import Prompt
 
 

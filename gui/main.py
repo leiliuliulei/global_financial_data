@@ -2,7 +2,7 @@ import dash
 from random import choice
 from dash import dcc, html, dash_table
 from dash.dependencies import Input, Output, State
-from analyser import WebFig
+from gui.analyser import WebFig
 from core.database import Segment
 
 seg = Segment()
