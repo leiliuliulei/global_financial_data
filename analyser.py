@@ -23,7 +23,7 @@ from rich.progress import Progress
 from itertools import chain
 from functools import partial
 from collections import ChainMap
-from database import Data, SingleProcessor, Segment
+from core.database import Data, SingleProcessor, Segment
 
 
 class WebFig(object):

@@ -3,7 +3,7 @@ from random import choice
 from dash import dcc, html, dash_table
 from dash.dependencies import Input, Output, State
 from analyser import WebFig
-from database import Segment
+from core.database import Segment
 
 seg = Segment()
 stock_list = [f'{name} A' for name in seg.stocks(market='A')] + [f'{name} H' for name in seg.stocks(market='H')]
