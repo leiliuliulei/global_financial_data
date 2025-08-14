@@ -234,7 +234,12 @@ def growth_and_valuation(income_figure, company_list, company, market):
               Input('industry_2_radio', 'value'),
               State('market', 'data'))
 def industrial_map(income_figure, industry_2_name, market):
-    return WebFig(seccodes=None, market=market).industry_map(industry_2_name)
+
+    if market == 'A':
+        location_df = seg.location(industry_2_name)
+        return WebFig(seccodes=None, market=market).industry_map(location_df, industry_2_name)
+    else:
+        return None
 
 
 if __name__ == "__main__":

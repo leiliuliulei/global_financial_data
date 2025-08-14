@@ -179,7 +179,6 @@ class Data(object):
         self._market = market
 
         self._year_col = '截止日期'
-        self._name_col = '证券简称'
 
         dict_a = {
             'income': {'table': 'stock2303',
@@ -246,8 +245,7 @@ class Data(object):
             self._query_dict = dict_h
 
     def income(self):
-        config = self._query_dict['income']
-        return self._db.basic_data(table=config['table'], columns=config['cols'], seccodes=self.seccodes)
+        return self._basic_data(dict_key='income')
 
     def cost(self):
         return self._basic_data(dict_key='cost')
@@ -300,6 +298,7 @@ class Data(object):
 
     def location(self, industry_2):
 
+        # 功能：输入A股二级行业名称，输出这个行业包含的证券简称、代码、城市、三级行业名称、营业收入
         query_str = f'''
 
         SELECT s21.SECNAME, s21.SECCODE, s21.F028V, s21.F038V, s23.F006N 
@@ -309,7 +308,7 @@ class Data(object):
             WHERE 
                 s21.F036V = "{industry_2}" and 
                 s21.CHANGE_CODE <> 2 and 
-                s21.SECCODE REGEXP "^[012345679]" and
+                LEFT(s21.SECCODE, 1) IN ("0","1","2","3","4","5","6","7","9") and
                 s23.F001D = "{newest_fiscal_year()}-12-31" and 
                 s23.F002V = "071001" and 
                 s23.CHANGE_CODE <> 2;'''
@@ -321,19 +320,17 @@ class Data(object):
     def _basic_data(self, dict_key, annual=True):
         # 凡是针对特定一些公司查询指标的，就用这个函数。此函数支持查一个数据库(table)或者查两个数据库(table_1, table_2)再合并
 
+        def q_seccode(t, c):
+            return self._db.select(table=t, columns=c).where(seccodes=self.seccodes, annual_only=annual).sort(by=self._year_col, sort_seccode=True)
+
         config = self._query_dict[dict_key]
 
         try:
-            table, cols = config['table'], config['cols']
-            df = self._db.select(table, cols).where(self.seccodes, annual).sort(by=self._year_col, sort_seccode=True)
+            df = q_seccode(config['table'], config['cols'])
 
         except KeyError:
-            table, cols = config['table_1'], config['cols_1']
-            df1 = self._db.select(table, cols).where(seccodes=self.seccodes).sort(by=self._year_col, sort_seccode=True)
-
-            table, cols = config['table_2'], config['cols_2']
-            df2 = self._db.select(table, cols).where(seccodes=self.seccodes).sort(by=self._year_col, sort_seccode=True)
-
+            df1 = q_seccode(config['table_1'], config['cols_1'])
+            df2 = q_seccode(config['table_2'], config['cols_2'])
             df = df1.merge(df2)
 
         # 在这里纠正港股年报未必在12月31日的问题
@@ -347,22 +344,22 @@ class Segment(object):
 
     def __init__(self):
 
-        db = FinancialDatabase()
+        self._db = FinancialDatabase()
 
         # 获取所有公司的seccode -> 总收入字典，为排序做准备
-        income_a = db.whole_database('stock2301', ['证券代码', '营业总收入'])
-        income_h = db.whole_database('hk4024', ['证券代码', '营业额'])
-        income_h_bank = db.whole_database('hk4022', ['证券代码', '总资产'])
+        income_a = self._whole_db_table('stock2301', ['证券代码', '营业总收入'])
+        income_h = self._whole_db_table('hk4024', ['证券代码', '营业额'])
+        income_h_bank = self._whole_db_table('hk4021', ['证券代码', '营业收益总额'])
 
         income_dicts = [df.set_index('证券代码').squeeze().to_dict() for df in [income_a, income_h, income_h_bank]]
         self._di = ChainMap(*income_dicts)
 
         # 从数据库里获取行业数据的全量df，包括A股的和H股的。
-        table, cols = 'stock2100', ['证券简称', '证券代码', '一级行业名称', '二级行业名称', '三级行业名称']
-        df_a = db.whole_database(table, cols, last_year_only=False)
+        table, cols = 'stock2100', ['证券简称', '证券代码', '所属城市', '一级行业名称', '二级行业名称', '三级行业名称']
+        df_a = self._whole_db_table(table, cols, last_year_only=False)
 
         table, cols = 'hk4001', ['证券简称', '证券代码', '一级行业名称', '二级行业名称']
-        df_h = db.whole_database(table, cols, last_year_only=False)
+        df_h = self._whole_db_table(table, cols, last_year_only=False)
 
         # 生成A股和H股的全量股票列表和一级行业列表
         self._secnames_a = df_a['证券简称'].unique().tolist()
@@ -398,6 +395,14 @@ class Segment(object):
         self._dc2_h = df_h['二级行业名称'].to_dict()
 
         self._dcn = ChainMap(df_a['证券简称'].to_dict(), df_h['证券简称'].to_dict())
+
+        # 把这个df永久保留在instance里，服务于画map图
+        self._df_a = df_a.reset_index()
+
+        # 读取城市GPS坐标数据，服务于画map图
+        geo_config = toml.load('configuration.toml')['geo']
+        self._geo_df = pd.read_excel(geo_config['geo_file_path'])
+
 
     def stocks(self, market):
         return self._secnames_a if market == 'A' else self._secnames_h
@@ -468,8 +473,22 @@ class Segment(object):
     def market_h(self, seccode):
         return seccode in self._seccodes_h
 
+    def location(self, industry_2):
+        # 输入二级行业名称，输出此行业包含公司的所在城市、GPS坐标、去年总收入
+
+        # 过滤出特定二级行业的公司名称。为了避免修改原变量，做了copy操作。
+        location_df = self._df_a[self._df_a['二级行业名称'] == industry_2].copy()
+
+        location_df['总收入'] = location_df['证券代码'].map(self._di)
+        merged_df = location_df.merge(self._geo_df, left_on='所属城市', right_on='区域名称')
+
+        return merged_df
+
     def _sort(self, seccodes):
         return sorted(seccodes, key=lambda code: self._di[code] if code in self._di else 0, reverse=True)
+
+    def _whole_db_table(self, table, columns, last_year_only=True):
+        return self._db.select(table, columns).where(seccodes=None, annual_only=False, last_year_only=last_year_only).sort()
 
 
 class FinancialDatabase(object):
@@ -495,13 +514,14 @@ class FinancialDatabase(object):
 
         # 关于数据库的一些补充规则，具体原因见name_dictionary.xlsx的“说明”sheet
         self._table_specific_rule = {
-            'stock2100': 'SECCODE REGEXP "^[012345679]" and CHANGE_CODE in (1, 3) and F034V is not null',  # 排除8开头code
+            'stock2100': 'LEFT(SECCODE, 1) IN ("0","1","2","3","4","5","6","7","9") and CHANGE_CODE in (1, 3) and F034V is not null',  # 排除8开头code
             'stock2301': 'F002V = "071001" and CHANGE_CODE in (1,3)',
             'stock2302': 'F002V = "071001" and CHANGE_CODE in (1,3)',
             'stock2303': 'F070V = "071001" and CHANGE_CODE in (1,3) and F001V = "033003"',
             'stock2401': '',
             'stock2402': '',
-            'hk4001': 'CHANGE_CODE in (1,3)',
+            'hk4001': '',
+            'hk4021': '',
             'hk4022': '',
             'hk4023': '',
             'hk4024': '',
@@ -531,16 +551,16 @@ class FinancialDatabase(object):
 
     def where(self, seccodes, annual_only=True, last_year_only=False):
 
-        name_rule = annual_rule = last_year_rule = None
+        code_rule = annual_rule = last_year_rule = None
 
         if seccodes:
             self._seccodes = seccodes
-            name_str = ', '.join(double_quote(seccodes))
-            name_rule = f'SECCODE in ({name_str})'
+            code_str = ', '.join(double_quote(seccodes))
+            code_rule = f'SECCODE in ({code_str})'
 
         if annual_only and self._table in ['stock2300', 'stock2301', 'stock2302', 'stock2303']:
             time_name = self._get_db_name(self._table, '截止日期')
-            annual_rule = f'{time_name} REGEXP "12-31"'
+            annual_rule = f'{time_name} LIKE "____-12-31"'      # 曾用方法：REGEXP "12-31"
 
         if annual_only and self._table in ['hk4021', 'hk4022', 'hk4023', 'hk4024', 'hk4025']:
             type_name = self._get_db_name(self._table, '报表类别')
@@ -551,7 +571,7 @@ class FinancialDatabase(object):
             last_year_rule = f'{time_name} = "{newest_fiscal_year()}-12-31"'
 
         other_rules = self._table_specific_rule[self._table]
-        where_rules = [name_rule, annual_rule, last_year_rule, other_rules]
+        where_rules = [code_rule, annual_rule, last_year_rule, other_rules]
 
         self._where_str = multi_rules(prefix='where', connector=' and ', rule_list=where_rules)
 
@@ -580,89 +600,6 @@ class FinancialDatabase(object):
         df = pd.read_sql_query(query_string, self._engine, parse_dates=['ENDDATE', 'TRADEDATE', 'DECLAREDATE'])
         return df.rename(columns=self._db2real_dicts[table_name])
 
-    def query_location(self, industry_2):
-
-        query_str = f'''
-
-        SELECT s21.SECNAME, s21.SECCODE, s21.F028V, s21.F038V, s23.F006N 
-
-            FROM stock2100 s21 INNER JOIN stock2301 s23 ON s21.SECCODE = s23.SECCODE 
-
-            WHERE 
-                s21.F036V = "{industry_2}" and 
-                s21.CHANGE_CODE <> 2 and 
-                s23.F001D = "{newest_fiscal_year()}-12-31" and 
-                s23.F002V = "071001" and 
-                s23.CHANGE_CODE <> 2;'''
-
-        return self.query(query_str, 'stock2100')
-
-    def basic_data(self, table, columns, seccodes, annual=True):
-        # 凡是针对特定一些公司查询指标的，就用这个函数，能满足大部分需求。
-
-        column_str = ', '.join(self._get_db_name(table, columns))
-
-        code_rule = self._get_code_rule(seccodes)
-        annual_rule = self._get_annual_rule(table) if annual else None
-        other_rules = self._table_specific_rule[table]
-        where_rules = [code_rule, annual_rule, other_rules]
-        where_str = multi_rules(prefix='where', connector=' and ', rule_list=where_rules)
-
-        date_str = self._get_db_name(table, '截止日期')
-        when_str = self._get_when_str(seccodes)
-
-        sql_str = f'select {column_str} from {table} {where_str} order by {date_str} desc, case SECCODE {when_str} end;'
-        df = self.query(sql_str, table)
-
-        # 这里纠正港股年报未必在12月31日的问题
-        if '报表类别' in df and not df.empty:
-            df['截止日期'] = df.apply(adjust_hk_enddate, axis=1)
-
-        return df
-
-    def whole_database(self, table, columns, last_year_only=True):
-
-        column_str = ', '.join(self._get_db_name(table, columns))
-
-        last_year_only_rule = self._get_last_year_only_rule(table) if last_year_only else None
-        other_rules = self._table_specific_rule[table]
-        where_rules = [last_year_only_rule, other_rules]
-        where_str = multi_rules(prefix='where', connector=' and ', rule_list=where_rules)
-
-        sql_str = f'select {column_str} from {table} {where_str};'
-
-        return self.query(sql_str, table)
-
-    def _get_annual_rule(self, table):
-
-        if table in ['stock2300', 'stock2301', 'stock2302', 'stock2303']:
-            time_name = self._get_db_name(table, '截止日期')
-            annual_rule = f'{time_name} REGEXP "12-31"'
-
-        elif table in ['hk4021', 'hk4022', 'hk4023', 'hk4024', 'hk4025']:
-            type_name = self._get_db_name(table, '报表类别')
-            annual_rule = f'{type_name} = "年报"'
-
-        else:
-            annual_rule = None
-
-        return annual_rule
-
-    @staticmethod
-    def _get_code_rule(seccodes):
-        code_str = ', '.join(double_quote(seccodes))
-        return f'SECCODE in ({code_str})'
-
-    @staticmethod
-    def _get_when_str(seccodes):
-        # when_list形成 ['when "招商银行" then 1', 'when "格力电器" then 2']
-        when_list = [f'when {item} then {i}' for i, item in enumerate(double_quote(seccodes), start=1)]
-        return ' '.join(when_list)
-
-    def _get_last_year_only_rule(self, table):
-        time_name = self._get_db_name(table, '截止日期')
-        return f'{time_name} = "{newest_fiscal_year()}-12-31"'
-
     def _get_db_name(self, table_name, name):
 
         table_dict = self._real2db_dicts[table_name]
@@ -671,6 +608,8 @@ class FinancialDatabase(object):
             return [table_dict[item] for item in name if item in table_dict]
         elif isinstance(name, str):
             return table_dict[name] if name in table_dict else None
+        else:
+            return None
 
 
 def adjust_hk_enddate(row):
@@ -687,9 +626,8 @@ def adjust_hk_enddate(row):
 
     if row['报表类别'] == '半年报':
         return datetime(last_year if date.month < 6 else this_year, 6, 30)
-
-    if row['报表类别'] == '年报':
-        return datetime(last_year, 12, 31)
+    else:
+        return datetime(last_year, 12, 31)      # 如果不是'半年报'，则肯定是'年报'
 
 
 def double_quote(list_or_string):
@@ -744,7 +682,7 @@ def n_year_mean(a_series, past_n_year):
     start_date = end_date - pd.offsets.YearEnd(past_n_year - 1)
     target_series = a_series.loc[end_date: start_date]
 
-    return target_series.mean() if len(target_series) == past_n_year else np.NAN
+    return target_series.mean() if len(target_series) == past_n_year else np.nan
 
 
 def first_last_year(data_series):
@@ -769,7 +707,7 @@ def growth_rate(data_series, past_n_year=None):
     data_series = data_series.dropna()
 
     if data_series.empty:
-        return np.NAN
+        return np.nan
 
     # 删除eps为0的数据，解决当 first_year = 0 时没法计算成长率的问题
     non_zero_mask = data_series != 0
@@ -781,13 +719,13 @@ def growth_rate(data_series, past_n_year=None):
     else:
         past_n_year = last_year.year - first_year.year
         if past_n_year == 0:
-            return np.NAN
+            return np.nan
 
     try:
         first_year_data = data_series.loc[first_year]
         last_year_data = data_series.loc[last_year]
     except KeyError:
-        return np.NAN
+        return np.nan
 
     # 当期初、期末数据都为正数(例如3年数据为2, 4, 8)：采用最普通的公式
     if first_year_data > 0 and last_year_data > 0:

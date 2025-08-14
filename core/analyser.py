@@ -1,6 +1,7 @@
 import re
 from re import search
 
+import numpy as np
 import toml
 import pandas as pd
 import plotly.express as px
@@ -114,9 +115,9 @@ class WebFig(object):
         # 原始的 pe_df 的颗粒度是工作日，但如果公司存在时间很长，则按照年度重新采样更平滑、好看。
         # A-May 表示年度采样而且以May做为每年的开头。这样的好处在于五月份刚刚把所有的年报更新完，五月的价格考虑了最新业绩。
         if total_months > 120:
-            chart_df = pe_df.resample('A-MAY', convention='end').nearest().loc[: datetime.today()]
+            chart_df = pe_df.resample('YE-MAY', convention='end').nearest().loc[: datetime.today()]
         elif 24 < total_months < 120:
-            chart_df = pe_df.resample('BQ', convention='end').nearest().loc[: datetime.today()]
+            chart_df = pe_df.resample('BQE', convention='end').nearest().loc[: datetime.today()]
         else:
             chart_df = pe_df.resample('BM', convention='end').nearest().loc[: datetime.today()]
 
@@ -152,34 +153,24 @@ class WebFig(object):
 
         return table_data, tooltip_data
 
-    def industry_map(self, industry_2_name):
+    @staticmethod
+    def industry_map(self, location_df, title):
 
-        # 如果不是A股，则不画图。因为只有A股有数据。
-        if self._market != 'A':
-            return None
-
-        # 上市公司所在的城市
-        location_df = self._data.location(industry_2_name)
-
-        # 附加这些城市的GPS位置
-        geo_config = toml.load('../configuration.toml')['geo']
-
+        # 读取mapbox的token，画图需要
+        geo_config = toml.load('configuration.toml')['geo']
         px.set_mapbox_access_token(geo_config['mapbox_token'])
-        geo_df = pd.read_excel(geo_config['geo_file_path'])
-
-        merged_df = location_df.merge(geo_df, left_on='所属城市', right_on='区域名称')
 
         # 整理数据
-        merged_df['城市+公司'] = merged_df['所属城市'].str.cat(merged_df['证券简称'], sep='<br>')
+        location_df['城市+公司'] = location_df['所属城市'].str.cat(location_df['证券简称'], sep='<br>')
 
         # 根据总收入，划分几个等级，体现为图里的size参数，即bubble大小
         range_bins = [0, 1.0e8, 1.0e9, 1.0e10, 1.0e11, 1.0e13]
         label_list = [1, 2, 6, 12, 20]
-        merged_df['收入级别'] = pd.cut(merged_df['营业收入'], bins=range_bins, labels=label_list, include_lowest=True)
+        location_df['收入级别'] = pd.cut(location_df['总收入'], bins=range_bins, labels=label_list, include_lowest=True)
 
         # 画图
-        title = f'申万二级行业：{industry_2_name}'
-        fig = px.scatter_mapbox(data_frame=merged_df, title=title, lat='latitude', lon='longitude',
+        title = f'申万二级行业：{title}'
+        fig = px.scatter_mapbox(data_frame=location_df, title=title, lat='latitude', lon='longitude',
                                 text='城市+公司', hover_name='证券简称', color='三级行业名称', size='收入级别',
                                 size_max=20,
                                 zoom=4, opacity=0.5, width=1400, height=1000, center=dict(lat=35, lon=105))
@@ -330,7 +321,7 @@ class Cli(object):
 
     def _str_to_stocks(self, secname_str):
 
-        # 当用户输入一个或多个股票名字，这时就区分处理。
+        # 当用户输入一个或多个股票名字，这时需区分处理：
 
         # 先看看到底是几个seccode。默认情况下，凑出下面的code_list就算完事了。也就是说只展示这几个公司的数据，不展示它们每个对应的同行。
         secname_list = re.split(pattern=r'\W+', string=secname_str)
@@ -377,7 +368,7 @@ class Cli(object):
 
     def _cli_line(self, seccode, summary_line):
 
-        # 修补问题：刚上市的公司还没有eps数据，所以eps df是空的，但证券简称来自于那里。所以在这里补充一下。
+        # 修补问题：刚上市的公司还没有eps数据，所以eps df是空的，但证券简称来自那里。所以在这里补充一下。
         if '证券简称' not in summary_line:
             summary_line['证券简称'] = self._seg.name(seccode)
 
@@ -455,6 +446,10 @@ class Cli(object):
         # 如果是markdown类型，说明希望按照markdown方式进行渲染，这里就不需要进行后续处理了
         if isinstance(kpi_value, Markdown):
             return kpi_value
+
+        # 少数情况，比如 '估值gap', '总收益' 两列，会出现 'N/A'，这种情况就直接返回默认色。
+        if kpi_value == 'N/A':
+            return Text(str(kpi_value), 'default')
 
         # 如果没找到这个KPI对应的评价字典（eval_dict），说明不需要评价它，直接返回默认色
         if kpi_name in self._kpi_dict:
@@ -596,7 +591,7 @@ def to_number(n):
     try:
         return float(n)
     except ValueError:
-        return n
+        return np.nan
 
 
 def multi_lines(prefix_list, number_list, seperator='\n', decimal=1):
