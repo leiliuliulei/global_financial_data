@@ -403,7 +403,6 @@ class Segment(object):
         geo_config = toml.load('configuration.toml')['geo']
         self._geo_df = pd.read_excel(geo_config['geo_file_path'])
 
-
     def stocks(self, market):
         return self._secnames_a if market == 'A' else self._secnames_h
 

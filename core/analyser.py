@@ -402,29 +402,11 @@ class Cli(object):
 
     def _abnormal_line(self, seccode, error_text):
 
-        # i1, i2, i3 = self._seg.belong(seccode)
-        # name = self._seg.name(seccode)
         error_dict = {col: error_text for col in self._cli_columns}
         output_series = pd.Series(error_dict)
 
         output_series.loc[['一级行业', '二级行业', '三级行业']] = [self._seg.belong(seccode)]
         output_series.loc['证券简称'] = self._seg.name(seccode)
-
-        # # 通过字典创建Series
-        # data = {'一级行业': i1,
-        #         '二级行业': i2,
-        #         '三级行业': i3,
-        #         '证券简称': name,
-        #         '链接': error_text,
-        #         '上市年限': error_text,
-        #         '毛利率': error_text,
-        #         '净利率': error_text,
-        #         'ROE': error_text,
-        #         '资产负债比': error_text,
-        #         'PE(静态 动态 预测)': error_text,
-        #         'EPS成长性': error_text,
-        #         '估值gap': error_text,
-        #         '总收益': error_text}
 
         return output_series
 
